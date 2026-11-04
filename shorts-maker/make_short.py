@@ -215,7 +215,7 @@ def build_timeline(events, cfg) -> dict:
     for ev in events:
         if ev["type"] == "line":
             dur = ev["duration"] + pause
-            segments.append({"start": round(t, 3), "duration": round(dur, 3),
+            segments.append({"start": round(t, 3), "duration": round(dur, 3), "voice": ev["duration"],
                              "character": ev["character"], "text": ev["text"], "audio": ev["audio"]})
             t += dur
         elif ev["type"] == "telop":
@@ -309,95 +309,186 @@ def load_background(cfg) -> Image.Image:
     return img.crop((left, top, left + W, top + H))
 
 
-def load_character_images(cfg) -> dict[str, Image.Image | None]:
+# 差分画像の名前: images/報告者.png を基本に、_口半 / _口開 / _目閉 / _目閉_口半 / _目閉_口開
+VARIANT_SUFFIX = {
+    ("open", "closed"): "", ("open", "half"): "_口半", ("open", "open"): "_口開",
+    ("closed", "closed"): "_目閉", ("closed", "half"): "_目閉_口半", ("closed", "open"): "_目閉_口開",
+}
+
+
+def load_character_images(cfg) -> dict[str, dict | None]:
+    """キャラごとに {(目, 口): 画像} を読む。差分がなければ基本画像で代用する。"""
     lay = cfg["layout"]
-    out = {}
+    out: dict[str, dict | None] = {}
     for name, ch in cfg["characters"].items():
         rel = ch.get("image", f"{cfg['images_dir']}/{name}.png")
-        if not rel:
+        base_path = find_file(ROOT / rel, IMAGE_EXTS) if rel else None
+        if base_path is None:
+            if rel:
+                warn(f"{name} の画像 {rel} がないので、キャラなしで表示します")
             out[name] = None
             continue
-        p = find_file(ROOT / rel, IMAGE_EXTS)
-        if p is None:
-            warn(f"{name} の画像 {rel} がないので、キャラなしで表示します")
-            out[name] = None
-            continue
-        img = Image.open(p).convert("RGBA")
-        scale = min(lay["character_max_width"] / img.width, lay["character_max_height"] / img.height)
-        out[name] = img.resize((round(img.width * scale), round(img.height * scale)), Image.LANCZOS)
+        base = Image.open(base_path).convert("RGBA")
+        scale = min(lay["character_max_width"] / base.width, lay["character_max_height"] / base.height)
+        size = (round(base.width * scale), round(base.height * scale))
+        found = {}
+        for key, suffix in VARIANT_SUFFIX.items():
+            p = base_path if not suffix else find_file(base_path.with_name(base_path.stem + suffix), IMAGE_EXTS)
+            if p:
+                found[key] = Image.open(p).convert("RGBA").resize(size, Image.LANCZOS)
+        sprites = {}
+        for eyes, mouth in VARIANT_SUFFIX:
+            for cand in [(eyes, mouth), (eyes, "half" if mouth == "open" else mouth), (eyes, "closed"),
+                         ("open", mouth), ("open", "half" if mouth == "open" else mouth), ("open", "closed")]:
+                if cand in found:
+                    sprites[(eyes, mouth)] = found[cand]
+                    break
+        lip = ("open", "open") in found or ("open", "half") in found
+        log(f"  {name}: 差分{len(found)}枚（口パク{'あり' if lip else 'なし'}・まばたき{'あり' if ('closed', 'closed') in found else 'なし'}）")
+        out[name] = sprites
     return out
 
 
-def render_frame(bg, char_img, text, fonts, cfg) -> np.ndarray:
-    lay, sub = cfg["layout"], cfg["subtitle"]
-    frame = bg.copy().convert("RGBA")
-    if char_img is not None:
-        x = (W - char_img.width) // 2
-        y = lay["character_bottom"] - char_img.height
-        frame.alpha_composite(char_img, (x, y))
-    if text:
-        lines = wrap_text(text, sub["chars_per_line"])
-        font = fit_font(fonts, lines, sub["font_size"], W - 2 * sub["margin_x"])
-        draw_lines(ImageDraw.Draw(frame), lines, font, W // 2, lay["subtitle_center_y"],
-                   sub["color"], sub["stroke_width"], sub["stroke_color"])
-    return np.array(frame.convert("RGB"))
-
-
-def render_telop(text, fonts, cfg) -> np.ndarray:
-    tc = cfg["telop"]
-    lines = wrap_text(text, tc["chars_per_line"])
-    font = fit_font(fonts, lines, tc["font_size"], W - 2 * tc["margin_x"])
+def render_text_layer(text, fonts, style, center_y=None) -> tuple[Image.Image, tuple[int, int]]:
+    """字幕・テロップを、文字の大きさぴったりの透明画像にする。"""
+    lines = wrap_text(text, style["chars_per_line"])
+    font = fit_font(fonts, lines, style["font_size"], W - 2 * style["margin_x"])
     lh = font.size * 1.25
-    pad = tc["stroke_width"] + 10
+    pad = style["stroke_width"] + 10
     width = int(max(font.getlength(l) for l in lines) + pad * 2)
     height = int(lh * len(lines) + pad * 2)
     img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     draw_lines(ImageDraw.Draw(img), lines, font, width / 2, height / 2,
-               tc["color"], tc["stroke_width"], tc["stroke_color"])
-    return np.array(img)
+               style["color"], style["stroke_width"], style["stroke_color"])
+    cy = H // 2 if center_y is None else center_y
+    return img, ((W - width) // 2, int(cy - height / 2))
+
+
+def voice_envelope(path: str, fps: int) -> np.ndarray:
+    """音声の大きさ（0〜1）をフレームごとに求める。口パクと弾みに使う。"""
+    with wave.open(path, "rb") as w:
+        rate, nch = w.getframerate(), w.getnchannels()
+        data = np.frombuffer(w.readframes(w.getnframes()), np.int16).astype(np.float32)
+    if nch > 1:
+        data = data.reshape(-1, nch).mean(axis=1)
+    hop = rate / fps
+    n = max(1, math.ceil(len(data) / hop))
+    env = np.array([np.sqrt(np.mean(data[int(i * hop):int((i + 1) * hop)] ** 2) + 1e-9) for i in range(n)])
+    ref = np.percentile(env, 90) if env.max() > 1 else 1.0
+    env = np.clip(env / max(ref, 1e-6), 0, 1)
+    return np.maximum(env, np.concatenate([[0], env[:-1]]) * 0.7)  # 口がチカチカしないよう少し残す
+
+
+def ease_out(x: float) -> float:
+    x = min(max(x, 0.0), 1.0)
+    return 1 - (1 - x) ** 3
+
+
+class Animator:
+    """1フレームごとに画面を作る（背景＋動くキャラ＋字幕＋テロップ＋画面揺れ）。"""
+
+    def __init__(self, timeline, cfg, fonts):
+        self.cfg, self.anim, self.lay = cfg, cfg["animation"], cfg["layout"]
+        self.fps = cfg["fps"]
+        self.total = timeline["duration"]
+        self.segs = timeline["segments"]
+        self.starts = [s["start"] for s in self.segs]
+        self.bg = load_background(cfg).convert("RGBA")
+        self.sprites = load_character_images(cfg)
+        self.subs = [render_text_layer(s["text"], fonts, cfg["subtitle"], self.lay["subtitle_center_y"])
+                     for s in self.segs]
+        self.telops = [(t, *render_text_layer(t["text"], fonts, cfg["telop"])) for t in timeline["telops"]]
+        self.envs = [voice_envelope(s["audio"], self.fps) for s in self.segs]
+        shake = set(self.anim["shake_se"])
+        self.shakes = [s["start"] for s in timeline["se"] if s["name"] in shake]
+        # 画面に出すキャラ（画像のないナレーターの間は、直前のキャラが待機姿勢で残る）
+        self.visible, self.entry, last = [], [], None
+        for s in self.segs:
+            cur = s["character"] if self.sprites.get(s["character"]) else last
+            self.entry.append(s["start"] if cur != last else None)
+            self.visible.append(cur)
+            last = cur
+        self.entry_time = []  # 各セグメントで、今のキャラが登場した時刻
+        t_in = 0.0
+        for e in self.entry:
+            t_in = e if e is not None else t_in
+            self.entry_time.append(t_in)
+
+    def blink(self, name: str, t: float) -> bool:
+        period = 3.1 + (sum(map(ord, name)) % 17) / 10  # キャラごとにずらす
+        phase = (t + (sum(map(ord, name)) % 7) * 0.37) % period
+        return phase < 0.1 or (int(t / period) % 3 == 2 and 0.22 < phase < 0.32)  # たまに2回まばたき
+
+    def frame(self, t: float) -> np.ndarray:
+        a = self.anim
+        si = max(0, np.searchsorted(self.starts, t, side="right") - 1)
+        seg = self.segs[si]
+        local = t - seg["start"]
+        talking = local < seg["voice"]
+        img = self.bg.copy()
+
+        name = self.visible[si]
+        if name:
+            amp = 0.0
+            if talking and seg["character"] == name:
+                env = self.envs[si]
+                amp = float(env[min(int(local * self.fps), len(env) - 1)])
+            mouth = "open" if amp > a["mouth_open"] else "half" if amp > a["mouth_half"] else "closed"
+            eyes = "closed" if self.blink(name, t) else "open"
+            sprite = self.sprites[name][(eyes, mouth)]
+            # 呼吸（ゆっくり上下）＋話すときの弾み＋登場のポップ
+            dy = math.sin(2 * math.pi * t / a["breath_period"]) * a["breath_px"] - amp * a["bounce_px"]
+            since = t - self.entry_time[si]
+            if since < a["pop_time"]:
+                k = ease_out(since / a["pop_time"])
+                s = a["pop_scale"] + (1 - a["pop_scale"]) * k
+                sprite = sprite.resize((max(1, int(sprite.width * s)), max(1, int(sprite.height * s))),
+                                       Image.BILINEAR)
+                dy += (1 - k) * a["pop_px"]
+            x = (W - sprite.width) // 2
+            y = int(self.lay["character_bottom"] - sprite.height + dy)
+            img.alpha_composite(sprite, (max(0, x), max(0, y)), (max(0, -x), max(0, -y)))
+
+        if talking:
+            sub, pos = self.subs[si]
+            img.alpha_composite(sub, pos)
+
+        for tel, timg, (tx, ty) in self.telops:
+            k = t - tel["start"]
+            if 0 <= k < tel["duration"]:
+                if k < a["telop_pop_time"]:  # ポンと大きく出て、元の大きさに戻る
+                    s = a["telop_pop_scale"] + (1 - a["telop_pop_scale"]) * ease_out(k / a["telop_pop_time"])
+                    timg2 = timg.resize((int(timg.width * s), int(timg.height * s)), Image.BILINEAR)
+                    cx, cy = tx + timg.width // 2, ty + timg.height // 2
+                    ox, oy = cx - timg2.width // 2, cy - timg2.height // 2
+                    crop = (max(0, -ox), max(0, -oy))
+                    img.alpha_composite(timg2, (max(0, ox), max(0, oy)), crop)
+                else:
+                    img.alpha_composite(timg, (tx, ty))
+
+        out = img.convert("RGB")
+        for st in self.shakes:  # ［SE:ドン］などで画面を揺らす
+            k = t - st
+            if 0 <= k < a["shake_time"]:
+                p = a["shake_px"] * (1 - k / a["shake_time"])
+                dx, dy = p * math.sin(k * 90), p * math.cos(k * 70)
+                m = a["shake_px"] + 2
+                out = out.crop((m + dx, m + dy, W - m + dx, H - m + dy)).resize((W, H), Image.BILINEAR)
+                break
+        return np.asarray(out)
 
 
 # --------------------------------------------------------------------------
 # 5. 書き出し（MoviePy）
 # --------------------------------------------------------------------------
 def render_video(timeline, cfg, out_path: Path) -> None:
-    from moviepy import (AudioFileClip, CompositeAudioClip, ImageClip,
-                         concatenate_videoclips, afx)
+    from moviepy import AudioFileClip, CompositeAudioClip, VideoClip, afx
 
     fonts = Fonts(cfg.get("font"))
-    bg = load_background(cfg)
-    chars = load_character_images(cfg)
-
-    log("画面を作成中...")
+    log("キャラ画像を読み込み中...")
+    anim = Animator(timeline, cfg, fonts)
     total = timeline["duration"]
-    segs, telops = timeline["segments"], timeline["telops"]
-    telop_imgs = [Image.fromarray(render_telop(t["text"], fonts, cfg), "RGBA") for t in telops]
-
-    # 画面が変わる時刻（セリフ・テロップの開始/終了）で区切り、区間ごとに1枚の静止画にする。
-    # テロップも静止画に焼き込むので、毎フレームの合成が不要になり書き出しが速い。
-    cuts = sorted({0.0, total, *(s["start"] for s in segs),
-                   *(t["start"] for t in telops), *(min(total, t["start"] + t["duration"]) for t in telops)})
-    base, cache = [], {}
-    for a, b in zip(cuts, cuts[1:]):
-        if b - a < 1e-3:
-            continue
-        mid = (a + b) / 2
-        si = max((i for i, s in enumerate(segs) if s["start"] <= mid), default=0)
-        seg = segs[si]
-        talking = mid < seg["start"] + seg["duration"]  # 最後のセリフの後は字幕なし
-        active = tuple(i for i, t in enumerate(telops) if t["start"] <= mid < t["start"] + t["duration"])
-        key = (si, talking, active)
-        if key not in cache:
-            frame = render_frame(bg, chars.get(seg["character"]), seg["text"] if talking else "", fonts, cfg)
-            if active:
-                img = Image.fromarray(frame).convert("RGBA")
-                for i in active:
-                    ti = telop_imgs[i]
-                    img.alpha_composite(ti, ((W - ti.width) // 2, (H - ti.height) // 2))
-                frame = np.array(img.convert("RGB"))
-            cache[key] = frame
-        base.append(ImageClip(cache[key]).with_duration(b - a))
-    video = concatenate_videoclips(base, method="chain").with_duration(total)
+    video = VideoClip(frame_function=anim.frame, duration=total)
 
     audio = [AudioFileClip(s["audio"]).with_start(s["start"]) for s in timeline["segments"]]
     audio += [AudioFileClip(s["path"]).with_effects([afx.MultiplyVolume(cfg["se_volume"])])

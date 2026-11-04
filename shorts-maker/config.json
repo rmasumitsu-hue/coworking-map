@@ -33,6 +33,21 @@
     "character_bottom": 1430,
     "subtitle_center_y": 1630
   },
+  "animation": {
+    "breath_period": 2.6,
+    "breath_px": 6,
+    "bounce_px": 18,
+    "mouth_half": 0.12,
+    "mouth_open": 0.45,
+    "pop_time": 0.22,
+    "pop_scale": 0.9,
+    "pop_px": 60,
+    "telop_pop_time": 0.15,
+    "telop_pop_scale": 1.35,
+    "shake_se": ["ドン", "ガシャーン"],
+    "shake_time": 0.35,
+    "shake_px": 18
+  },
   "subtitle": {
     "chars_per_line": 15,
     "font_size": 66,

@@ -1,0 +1,52 @@
+{
+  "voicevox_url": "http://localhost:50021",
+  "speed": 1.2,
+  "speed_step": 0.1,
+  "max_speed": 2.0,
+  "max_duration": 60,
+  "pause_after_line": 0.15,
+  "telop_duration": 1.5,
+  "fps": 30,
+
+  "images_dir": "images",
+  "sounds_dir": "sounds",
+  "background": "images/background.png",
+  "bgm": "sounds/bgm.mp3",
+  "bgm_volume": 0.15,
+  "se_volume": 1.0,
+  "font": "",
+
+  "characters": {
+    "報告者":       { "speaker": "春日部つむぎ", "style": "ノーマル", "image": "images/報告者.png" },
+    "義母":         { "speaker": "四国めたん",   "style": "ノーマル", "image": "images/義母.png" },
+    "アシスタント": { "speaker": "冥鳴ひまり",   "style": "ノーマル", "image": "images/アシスタント.png" },
+    "ナレーター":   { "speaker": "青山龍星",     "style": "ノーマル", "image": "" }
+  },
+  "aliases": {
+    "悪役": "義母",
+    "逆転役": "アシスタント"
+  },
+
+  "layout": {
+    "character_max_width": 950,
+    "character_max_height": 1050,
+    "character_bottom": 1430,
+    "subtitle_center_y": 1630
+  },
+  "subtitle": {
+    "chars_per_line": 15,
+    "font_size": 66,
+    "margin_x": 40,
+    "color": "#FFFFFF",
+    "stroke_width": 7,
+    "stroke_color": "#000000"
+  },
+  "telop": {
+    "chars_per_line": 8,
+    "font_size": 120,
+    "margin_x": 50,
+    "color": "#FF1E1E",
+    "stroke_width": 10,
+    "stroke_color": "#FFFFFF"
+  }
+}

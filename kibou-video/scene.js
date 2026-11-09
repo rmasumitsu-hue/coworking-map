@@ -108,7 +108,7 @@ function buildStrokes() {
   bounds = { x0, x1, z0, z1 };
   // lanes
   for (const s of strokes) {
-    const P = s.path, nL = s.unitLen > 42 ? 3 : 2, gap = C.laneGap * Math.pow(s.k, 0.85), offs = nL === 3 ? [-1, 0, 1] : [-.5, .5];
+    const P = s.path, near = s.k < 1.05, nL = s.unitLen > (near ? 18 : 42) ? 3 : 2, gap = C.laneGap * Math.pow(s.k, 0.85) * (near ? 0.85 : 1), offs = nL === 3 ? [-1, 0, 1] : [-.5, .5];
     const sweep = /[㇒㇏㇓㇀㇔]/.test(s.type);
     s.nL = nL; s.lanes = [];
     const nrm = P.p.map((_, i) => { const d = P.dir(P.c[i], 1.1); return [d[1], -d[0]]; });
@@ -182,7 +182,7 @@ class Walker {
   sAt(t) { const T = this.tab; const f = (t - T.t0) / T.dt; if (f <= 0) return T.s[0]; if (f >= T.n - 1) return T.s[T.n - 1]; const i = f | 0; return lerp(T.s[i], T.s[i + 1], f - i); }
   tAt(s) { const T = this.tab; let lo = 0, hi = T.n - 1; if (T.s[hi] < s - 1e-4) return Infinity; while (hi - lo > 1) { const m = (lo + hi) >> 1; if (T.s[m] < s - 1e-4) lo = m; else hi = m; } return T.t0 + hi * T.dt; }
   buildSteps() {
-    const st = C.stride, s = [], sEnd = this.sEnd;
+    const st = this.stride, s = [], sEnd = this.sEnd;
     const N = Math.round((sEnd - this.sigma - 0.5 * st) / st);
     const kmin = Math.floor(-this.sigma / st) - 4;
     for (let k = kmin; k <= N; k++) {
@@ -305,7 +305,9 @@ function finishWalker(w, st, Sm, v) {
     w.knots.push([tStop, sEndRaw]);
   }
   // step phase so a print lands at stroke start
-  const st_ = C.stride; let sig = ((w.sA + 0.04 - 0.5 * st_) % st_ + st_) % st_ - st_; w.sigma = sig;
+  // near glyph: shorter, denser steps so its strokes read clearly
+  w.stride = C.stride * (st.k < 1.05 ? 0.74 : 1);
+  const st_ = w.stride; let sig = ((w.sA + 0.04 - 0.5 * st_) % st_ + st_) % st_ - st_; w.sigma = sig;
   const N = Math.floor((sEndRaw - sig - 0.5 * st_) / st_ + 1e-6); w.sEnd = sig + (N + 0.5) * st_;
   // retime last knot to the snapped end
   const kn = w.knots; const kl = kn[kn.length - 1];
@@ -336,7 +338,7 @@ function buildPrints() {
       const t = w.tAt(q.land); if (!isFinite(t) || t < w.tSpawn) continue;
       q.t = t;
       if (q.at >= w.printA && q.at <= w.printB) {
-        prints.push({ x: q.x + (R() - .5) * 0.015, z: q.z + (R() - .5) * 0.015, ang: q.ang + (R() - .5) * 0.07, side: q.side, t, v: (R() * 3) | 0, sc: (0.95 + R() * 0.1) * Math.pow(strokes[w.stroke].k, 0.75) });
+        prints.push({ x: q.x + (R() - .5) * 0.015, z: q.z + (R() - .5) * 0.015, ang: q.ang + (R() - .5) * 0.07, side: q.side, t, v: (R() * 3) | 0, sc: (0.95 + R() * 0.1) * Math.pow(strokes[w.stroke].k, 0.75) * (strokes[w.stroke].k < 1.05 ? 1.12 : 1) });
       } else if (t < 23.2) scenSeeds.push({ x: q.x, z: q.z, t, w });
     }
   }
@@ -514,7 +516,7 @@ function poseOf(w, t) {
     fl = mv(fl, 0, smooth(0, 0.55, q)); fr = mv(fr, 1, smooth(0.45, 1, q));
   }
   const f = [Math.cos(ang), Math.sin(ang)], r = [f[1], -f[0]];
-  const st = C.stride; const frac = (((s - w.sigma) / st) % 1 + 1) % 1;
+  const st = w.stride; const frac = (((s - w.sigma) / st) % 1 + 1) % 1;
   const hy = 0.985 - 0.05 * amp * (1 - Math.pow(Math.sin(Math.PI * frac), 2));
   const sway = 0.018 * amp * Math.sin(Math.PI * (s - w.sigma) / st);
   const hip = [P[0] + r[0] * sway, hy, P[1] + r[1] * sway];

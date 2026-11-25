@@ -1,7 +1,7 @@
 // 足跡で「希望」を書く縦型ショート (1080x1920, 30fps, 30s)
 //   node render.cjs --still 26 [out.png]     ... 静止画
 //   node render.cjs --video [out.mp4]        ... 動画
-const TEXT = "希望";   // ← 差し替え可能。上から縦に並ぶ（KanjiVGにある字なら何でも）
+const TEXT = "気合\nだ！";   // ← 差し替え可能。\n で改行（奥の行→手前の行）。KanjiVGにある字なら何でも
 
 const fs = require('fs'), path = require('path'), https = require('https');
 const { spawn } = require('child_process');
@@ -32,14 +32,16 @@ async function kanjivg(ch) {
     strokes.push({ n: +id[1], d: /\sd="([^"]+)"/.exec(tag)[1], type: (/kvg:type="([^"]*)"/.exec(tag) || [])[1] || '' });
   }
   strokes.sort((a, b) => a.n - b.n);
-  return { ch, strokes };
+  return { strokes };
 }
 
 async function main() {
   const args = process.argv.slice(2);
   const mode = args.includes('--video') ? 'video' : 'still';
   const chars = [];
-  for (const ch of Array.from(TEXT)) chars.push(await kanjivg(ch));
+  TEXT.split('\n').forEach((line, row) => Array.from(line).forEach((ch, col) => chars.push({ ch, row, col, ncol: Array.from(line).length })));
+  for (const c of chars) Object.assign(c, await kanjivg(c.ch));
+  const nrow = TEXT.split('\n').length; for (const c of chars) c.nrow = nrow;
   const data = { chars, seed: 20261109 };
   const browser = await chromium.launch({ args: ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'] });
   const newPage = async () => {

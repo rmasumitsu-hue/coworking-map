@@ -14,15 +14,15 @@ const wrapA = a => { while (a > Math.PI) a -= TAU; while (a < -Math.PI) a += TAU
 const C = {
   unit: 0.165,          // metres per KanjiVG unit (109 units per glyph box)
   charGap: 0.6,         // metres between glyph boxes
-  laneGap: 0.44,        // spacing of walkers side by side (brush width)
-  footLat: 0.10,       // half distance between left/right feet
+  laneGap: 0.62,        // spacing of walkers side by side (brush width)
+  footLat: 0.14,       // half distance between left/right feet
   stride: 0.60,         // unhurried, deliberate steps         // one step
-  footLen: 0.44,      // slightly exaggerated so the ink reads as a brush stroke
+  footLen: 0.62,      // slightly exaggerated so the ink reads as a brush stroke
   vStroke: 1.15, vTransit: 2.0, vRing: 1.2,
   tLeader: 0.45, tFinish: 21.9, tStop: 22.3,
   ringMargin: 2.6,
-  pitch: 45 * DEG, F: 1000, horizonY: 384, camH: 10.5,
-  textTop: 830, textBot: 1830, // screen band the text occupies in the main shot
+  pitch: 45 * DEG, F: 1000, horizonY: 384, camH: 18,
+  textTop: 740, textBot: 1820, textSide: 40, // screen band the text occupies in the main shot
 };
 C.cy = C.horizonY + C.F * Math.tan(C.pitch);
 const cp = Math.cos(C.pitch), sp = Math.sin(C.pitch);
@@ -80,25 +80,44 @@ window.initScene = function (data) {
 
 function buildStrokes() {
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); document.body.appendChild(svg);
-  strokes = []; const n = D.chars.length;
-  // Perspective-corrected lettering (like road markings): each glyph gets a screen band in the
-  // main shot; its world size is derived from that band, so the far glyph is physically larger.
+  strokes = [];
+  // Perspective-corrected lettering (like road markings): each glyph gets a rectangle on screen in
+  // the main shot and its world size is derived from it, so far glyphs are physically larger.
+  // The rectangles are scribbled: random size, tilt, shear and overlap, filling the screen.
   const zOfY = y => { const d = C.pitch + Math.atan((y - C.cy) / C.F); return C.camH / Math.tan(d); };
-  const wts = Array.from({ length: n }, (_, i) => Math.pow(1.6, i)); const wsum = wts.reduce((a, b) => a + b, 0);
-  const gapPx = 18; let y = C.textTop; const bands = [];
-  for (let i = 0; i < n; i++) { const h = (C.textBot - C.textTop - gapPx * (n - 1)) * wts[i] / wsum; bands.push([y, y + h]); y += h + gapPx; }
-  D.glyph = bands.map(([yt, yb], i) => {
-    const zt = zOfY(yt), zb = zOfY(yb), ym = (yt + yb) / 2, zm = zOfY(ym);
-    const zc = C.camH * sp + zm * cp; const wpx = n === 1 ? 880 : lerp(790, 880, i / (n - 1));
-    return { zt, zb, kx: wpx * zc / C.F / 95, kz: (zt - zb) / 95 };
+  const nrow = D.chars[0].nrow || 1, rr = rng(4242);
+  const wts = Array.from({ length: nrow }, (_, i) => Math.pow(1.45, i)); const wsum = wts.reduce((a, b) => a + b, 0);
+  let y = C.textTop; const bands = [];
+  for (let i = 0; i < nrow; i++) { const h = (C.textBot - C.textTop) * wts[i] / wsum; bands.push([y, y + h]); y += h; }
+  D.glyph = D.chars.map(ch => {
+    const [yt0, yb0] = bands[ch.row || 0], hb = yb0 - yt0;
+    const yt = yt0 + (rr() - .5) * hb * 0.12, yb = yb0 + (rr() - .5) * hb * 0.12;
+    const cw = (W - 2 * C.textSide) / (ch.ncol || 1), sx = C.textSide + cw * ((ch.col || 0) + 0.5) + (rr() - .5) * cw * 0.15;
+    const zt = zOfY(yt), zb = zOfY(Math.min(yb, H - 20)), zm = zOfY((yt + yb) / 2);
+    const zc = C.camH * sp + zm * cp; const wpx = cw * (1.05 + rr() * 0.3);
+    return { zt, zb, xc: (sx - W / 2) * zc / C.F, kx: wpx * zc / C.F / 95, kz: (zt - zb) / 95,
+      rot: (rr() - .5) * 0.35, shear: (rr() - .5) * 0.35, sc: 0.92 + rr() * 0.2 };
   });
-  const baseK = D.glyph[n - 1].kx;
+  const baseK = Math.min(...D.glyph.map(g => g.kx));
   D.chars.forEach((ch, ci) => {
     const G = D.glyph[ci], zmid = (G.zt + G.zb) / 2;
     ch.strokes.forEach((st, si) => {
       const pe = document.createElementNS('http://www.w3.org/2000/svg', 'path'); pe.setAttribute('d', st.d); svg.appendChild(pe);
       const L = pe.getTotalLength(), k = Math.max(8, Math.ceil(L / 0.6)); const pts = [];
-      for (let i = 0; i <= k; i++) { const q = pe.getPointAtLength(L * i / k); pts.push([(q.x - 54.5) * G.kx, zmid - (q.y - 54.5) * G.kz]); }
+      // per-stroke scrawl: offset, twist, length and a hand wobble
+      const ox = (rr() - .5) * 6, oy = (rr() - .5) * 6, tw = (rr() - .5) * 0.22, ls = 0.9 + rr() * 0.25;
+      const ph = rr() * TAU, wa = 1.5 + rr() * 2;
+      let c0 = pe.getPointAtLength(0);
+      for (let i = 0; i <= k; i++) {
+        const q = pe.getPointAtLength(L * i / k);
+        let u = c0.x + (q.x - c0.x) * ls, v = c0.y + (q.y - c0.y) * ls;
+        const du = u - c0.x, dv = v - c0.y; u = c0.x + du * Math.cos(tw) - dv * Math.sin(tw); v = c0.y + du * Math.sin(tw) + dv * Math.cos(tw);
+        u += ox + wa * Math.sin(ph + i / k * 7.5); v += oy + wa * Math.cos(ph * 1.3 + i / k * 6.1);
+        // glyph-level tilt / shear / scale about the centre
+        let gx = (u - 54.5) * G.sc, gy = (v - 54.5) * G.sc; gx += gy * G.shear;
+        const rx = gx * Math.cos(G.rot) - gy * Math.sin(G.rot), ry = gx * Math.sin(G.rot) + gy * Math.cos(G.rot);
+        pts.push([G.xc + rx * G.kx, zmid - ry * G.kz]);
+      }
       strokes.push({ ci, si, type: st.type || '', path: new Path(pts), pts, k: G.kx / baseK, unitLen: L });
     });
   });
@@ -215,7 +234,7 @@ function buildWalkers() {
   const dur = strokes.map(s => s.path.L / C.vStroke);
   const S = new Array(M).fill(0);
   S[0] = C.tLeader + 1.0 / C.vStroke + 0.45;
-  const delta = Math.max(0.2, (C.tFinish - S[0] - dur[M - 1]) / Math.max(1, M - 1));
+  const delta = Math.max(0.2, (C.tFinish - S[0] - Math.min(dur[M - 1], 6)) / Math.max(1, M - 1));
 
   const alive = (t) => walkers.filter(w => t >= w.tSpawn + 0.35 && t < w.tStopS - 0.5);
   const posAt = (w, t) => w.path.at(w.sAt(t));
@@ -225,7 +244,7 @@ function buildWalkers() {
     let Sm, v;
     const group = [];
     if (m === 0) {
-      Sm = S[0]; v = C.vStroke;
+      Sm = S[0]; v = clamp(Math.max(C.vStroke, st.path.L / 8.5), 0.9, 4.2);
       const lead = Math.floor(lanes.length / 2);
       const order = [lead, ...lanes.map((_, j) => j).filter(j => j !== lead)];
       for (const j of order) {
@@ -255,17 +274,17 @@ function buildWalkers() {
     // later groups: branch from nearest live walker
     Sm = Math.max(S[0] + m * delta, S[m - 1] + 0.15);
     const preMean = [0, 0]; const pres = lanes.map(ln => { const p = [ln.path.p[0][0] - t0dir[0] * 1.0, ln.path.p[0][1] - t0dir[1] * 1.0]; preMean[0] += p[0] / lanes.length; preMean[1] += p[1] / lanes.length; return p; });
-    const tMin = 0.9 + 0.32 * m;
-    let tsp = Sm - 3, src = null, dist = 0;
+    const tMin = 0.9 + Math.min(0.32, 6 / M) * m;
+    let tsp = Sm - 3, src = null, dist = 0, vTr = C.vTransit;
     for (let it = 0; it < 4; it++) {
       const cand = alive(Math.max(tsp, tMin)); src = null; let best = 1e9;
       for (const w of cand) { const p = posAt(w, Math.max(tsp, tMin)); const d = Math.hypot(p[0] - preMean[0], p[1] - preMean[1]); if (d < best) { best = d; src = w; } }
-      dist = best + 1.0; tsp = Sm - dist / C.vTransit - 0.2;
+      dist = best + 1.0; vTr = clamp(dist / Math.max(0.5, Sm - 0.2 - tMin), C.vTransit, 5.5); tsp = Sm - dist / vTr - 0.2;
     }
-    if (tsp < tMin) { tsp = tMin; const p = posAt(src, tsp); dist = Math.hypot(p[0] - preMean[0], p[1] - preMean[1]) + 1.0; Sm = Math.max(Sm, tsp + dist / C.vTransit + 0.2); }
+    if (tsp < tMin) { tsp = tMin; const p = posAt(src, tsp); dist = Math.hypot(p[0] - preMean[0], p[1] - preMean[1]) + 1.0; Sm = Math.max(Sm, tsp + dist / vTr + 0.2); }
     S[m] = Sm;
     const avail = (m === M - 1 ? C.tFinish : C.tFinish - 0.35) - Sm;
-    v = m === M - 1 ? clamp(st.path.L / avail, 0.9, 2.3) : clamp(Math.max(C.vStroke, st.path.L / avail), 0.9, 2.3);
+    v = m === M - 1 ? clamp(st.path.L / avail, 0.9, 4.2) : clamp(Math.max(C.vStroke, st.path.L / 8.5, st.path.L / avail), 0.9, 4.2);
     lanes.forEach((ln, j) => {
       const tS = tsp + j * 0.12; const p0 = posAt(src, tS); const lp = ln.path, pre = pres[j];
       const d1 = Math.hypot(pre[0] - p0[0], pre[1] - p0[1]), d2 = Math.hypot(lp.p[0][0] - pre[0], lp.p[0][1] - pre[1]);
@@ -306,7 +325,7 @@ function finishWalker(w, st, Sm, v) {
   }
   // step phase so a print lands at stroke start
   // near glyph: shorter, denser steps so its strokes read clearly
-  w.stride = C.stride * (st.k < 1.05 ? 0.74 : 1);
+  w.stride = clamp(C.stride * Math.max(1, v / 1.15), 0.6, 1.6) * (st.k < 1.05 ? 0.8 : 1); // runners take longer strides
   const st_ = w.stride; let sig = ((w.sA + 0.04 - 0.5 * st_) % st_ + st_) % st_ - st_; w.sigma = sig;
   const N = Math.floor((sEndRaw - sig - 0.5 * st_) / st_ + 1e-6); w.sEnd = sig + (N + 0.5) * st_;
   // retime last knot to the snapped end

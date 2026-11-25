@@ -325,8 +325,11 @@ function finishWalker(w, st, Sm, v) {
   const fin = w.path.at(w.sEnd); const tc = st.centroid;
   let ta = Math.atan2(tc[1] - fin[1], tc[0] - fin[0]);
   const hd = w.path.dir(w.sEnd, 0.5), ha = Math.atan2(hd[1], hd[0]);
-  if (late) ta = ha + Math.PI + (R() - .5) * 0.6; // turn around to look along the finished stroke
+  if (late) ta = ha + Math.PI + (R() - .5) * 0.6;
+  // once the text is finished everyone turns to the camera and waves
+  ta = Math.atan2(camMain.z - fin[1], camMain.x - fin[0]) + (R() - .5) * 0.5;
   w.faceAng = ta; w.walkAng = ha;
+  w.wavePh = R() * TAU; w.waveBoth = R() < 0.4; w.waveSide = R() < 0.5 ? -1 : 1; w.waveHz = 1.8 + R() * 0.6;
   w.tTurn = Math.max(w.tStopS, C.tStop + 0.1) + 0.2 + R() * 0.6;
 }
 
@@ -528,11 +531,11 @@ function poseOf(w, t) {
   };
   const LL = leg(fl, -1), LR = leg(fr, 1);
   const lean = 0.05 + 0.04 * amp;
-  const neck = [hip[0] + f[0] * lean, hip[1] + 0.535, hip[2] + f[1] * lean];
-  const shY = neck[1] - 0.045;
+  const neck = [hip[0] + f[0] * lean * 0.6, hip[1] + 0.46, hip[2] + f[1] * lean * 0.6];
+  const shY = neck[1] - 0.07;
   // shoulders counter-rotate with stride
   const twist = 0.06 * amp * Math.sin(Math.PI * (s - w.sigma) / st);
-  const sh = sgn => [neck[0] + r[0] * 0.18 * sgn + f[0] * twist * sgn, shY, neck[2] + r[1] * 0.18 * sgn + f[1] * twist * sgn];
+  const sh = sgn => [neck[0] + r[0] * 0.03 * sgn + f[0] * twist * sgn, shY, neck[2] + r[1] * 0.18 * sgn + f[1] * twist * sgn];
   const rel = ft => clamp(((ft.x - hip[0]) * f[0] + (ft.z - hip[2]) * f[1]) / 0.36, -1.2, 1.2);
   const arm = (sgn, other) => {
     const S = sh(sgn); const b = 0.5 * rel(other) * amp; const out = 0.035;
@@ -541,21 +544,50 @@ function poseOf(w, t) {
     const Hn = [E[0] + (f[0] * Math.sin(b2) + r[0] * 0.02 * sgn) * 0.27, E[1] - Math.cos(b2) * 0.27, E[2] + (f[1] * Math.sin(b2) + r[1] * 0.02 * sgn) * 0.27];
     return { S, E, Hn };
   };
-  const AL = arm(-1, fr), AR = arm(1, fl);
-  const head = [neck[0] + f[0] * 0.025, neck[1] + 0.165, neck[2] + f[1] * 0.025];
-  return { hip, LL, LR, AL, AR, neck, head, pelL: pel(-1), pelR: pel(1), alpha: w.tSpawn < 0 ? 1 : smooth(w.tSpawn, w.tSpawn + 0.4, t) };
+  let AL = arm(-1, fr), AR = arm(1, fl);
+  // waving
+  const tw = w.tTurn + 0.9, wv = smooth(tw, tw + 0.5, t);
+  if (wv > 0) {
+    const waveArm = (A, sgn) => {
+      const S = A.S, o = Math.sin(TAU * w.waveHz * (t - tw) + w.wavePh + (sgn > 0 ? 0 : 1.3));
+      const dE = [r[0] * sgn * 0.9 + f[0] * 0.1, 0.45, r[1] * sgn * 0.9 + f[1] * 0.1], lE = Math.hypot(...dE);
+      const E = [S[0] + dE[0] / lE * 0.27, S[1] + dE[1] / lE * 0.27, S[2] + dE[2] / lE * 0.27];
+      const th = sgn * (0.2 + 0.6 * o);
+      const Hn = [E[0] + r[0] * Math.sin(th) * 0.3 + f[0] * 0.04, E[1] + Math.cos(th) * 0.3, E[2] + r[1] * Math.sin(th) * 0.3 + f[1] * 0.04];
+      const mixP = (a, b) => [lerp(a[0], b[0], wv), lerp(a[1], b[1], wv), lerp(a[2], b[2], wv)];
+      return { S, E: mixP(A.E, E), Hn: mixP(A.Hn, Hn) };
+    };
+    if (w.waveBoth || w.waveSide < 0) AL = waveArm(AL, -1);
+    if (w.waveBoth || w.waveSide > 0) AR = waveArm(AR, 1);
+  }
+  const hop = wv * 0.035 * Math.abs(Math.sin(Math.PI * w.waveHz * (t - tw) + w.wavePh));
+  if (hop) for (const p of [hip, neck, AL.S, AL.E, AL.Hn, AR.S, AR.E, AR.Hn]) p[1] += hop;
+  const head = [neck[0] + f[0] * 0.02, neck[1] + 0.25, neck[2] + f[1] * 0.02];
+  return { hip, LL, LR, AL, AR, neck, head, f, r, pelL: pel(-1), pelR: pel(1), alpha: w.tSpawn < 0 ? 1 : smooth(w.tSpawn, w.tSpawn + 0.4, t) };
 }
-function drawFigure(ctx, J, pf) {
-  const seg = (a, b, th) => { const A = pf(a), B = pf(b); if (A[2] < 0.3 || B[2] < 0.3) return; ctx.lineWidth = Math.max(0.6, th * C.F * 2 / (A[2] + B[2])); ctx.beginPath(); ctx.moveTo(A[0], A[1]); ctx.lineTo(B[0], B[1]); ctx.stroke(); };
-  const poly = (pts, th) => { const P = pts.map(pf); if (P.some(p => p[2] < 0.3)) return; const z = P.reduce((a, p) => a + p[2], 0) / P.length; ctx.lineWidth = th * C.F / z; ctx.beginPath(); P.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])); ctx.closePath(); ctx.fill(); ctx.stroke(); };
-  for (const Lg of [J.LL, J.LR]) { seg(Lg.H, Lg.K, 0.155); seg(Lg.K, Lg.A, 0.115); seg(Lg.A, Lg.T, 0.085); }
-  const mid = (a, b, u) => [lerp(a[0], b[0], u), lerp(a[1], b[1], u), lerp(a[2], b[2], u)];
-  const pc = mid(J.pelL, J.pelR, .5); const chest = [J.neck[0], J.neck[1] - 0.12, J.neck[2]];
-  seg([pc[0], pc[1] + 0.05, pc[2]], chest, 0.25);
-  poly([J.pelL, J.pelR, J.AR.S, J.AL.S], 0.1);
-  for (const A of [J.AL, J.AR]) { seg(A.S, A.E, 0.095); seg(A.E, A.Hn, 0.075); }
-  seg(J.neck, J.head, 0.1);
-  const Hd = pf(J.head); if (Hd[2] > 0.3) { ctx.beginPath(); ctx.ellipse(Hd[0], Hd[1], 0.105 * C.F / Hd[2], 0.12 * C.F / Hd[2], 0, 0, TAU); ctx.fill(); }
+function drawFigure(ctx, J, pf, face) {
+  // cute stick figure: round head, single-line body, thin rounded limbs
+  const seg = (a, b, th) => { const A = pf(a), B = pf(b); if (A[2] < 0.3 || B[2] < 0.3) return; ctx.lineWidth = Math.max(0.8, th * C.F * 2 / (A[2] + B[2])); ctx.beginPath(); ctx.moveTo(A[0], A[1]); ctx.lineTo(B[0], B[1]); ctx.stroke(); };
+  const LW = 0.07;
+  for (const Lg of [J.LL, J.LR]) { seg(Lg.H, Lg.K, LW); seg(Lg.K, Lg.A, LW); }
+  const pc = [(J.pelL[0] + J.pelR[0]) / 2, J.pelL[1], (J.pelL[2] + J.pelR[2]) / 2];
+  seg(J.pelL, J.pelR, LW); seg(pc, J.neck, LW * 1.15);
+  for (const A of [J.AL, J.AR]) { seg(J.neck, A.S, LW); seg(A.S, A.E, LW); seg(A.E, A.Hn, LW); }
+  const Hd = pf(J.head); if (Hd[2] <= 0.3) return;
+  const rad = 0.215 * C.F / Hd[2];
+  ctx.beginPath(); ctx.arc(Hd[0], Hd[1], rad, 0, TAU); ctx.fill();
+  for (const A of [J.AL, J.AR]) { const h = pf(A.Hn); if (h[2] > 0.3) { ctx.beginPath(); ctx.arc(h[0], h[1], 0.05 * C.F / h[2], 0, TAU); ctx.fill(); } }
+  if (!face) return;
+  // face: only when it turns toward the camera
+  const tc = [cam.x - J.head[0], cam.y - J.head[1], cam.z - J.head[2]], tl = Math.hypot(...tc);
+  const facing = (J.f[0] * tc[0] + J.f[1] * tc[2]) / tl; if (facing < 0.15 || rad < 3) return;
+  const save = ctx.fillStyle, saveS = ctx.strokeStyle; ctx.fillStyle = ctx.strokeStyle = face;
+  ctx.globalAlpha = smooth(0.15, 0.5, facing) * (ctx.globalAlpha || 1);
+  const on = (dr, du) => pf([J.head[0] + J.f[0] * 0.17 + J.r[0] * dr, J.head[1] + du, J.head[2] + J.f[1] * 0.19 + J.r[1] * dr]);
+  for (const sg of [-1, 1]) { const e = on(sg * 0.075, 0.08); ctx.beginPath(); ctx.arc(e[0], e[1], Math.max(0.7, rad * 0.11), 0, TAU); ctx.fill(); }
+  const m0 = on(-0.06, 0.0), m1 = on(0.06, 0.0), mc = on(0, -0.05);
+  ctx.lineWidth = Math.max(0.7, rad * 0.09); ctx.beginPath(); ctx.moveTo(m0[0], m0[1]); ctx.quadraticCurveTo(mc[0], mc[1], m1[0], m1[1]); ctx.stroke();
+  ctx.globalAlpha = 1; ctx.fillStyle = save; ctx.strokeStyle = saveS;
 }
 
 // ---------------------------------------------------------------- frame
@@ -633,12 +665,12 @@ window.renderFrame = function (t, fmt = 'image/jpeg', q = 0.95) {
   for (const o of live) { const A = aff(o.J.hip[0], 0, o.J.hip[2]); if (!A) continue; c.setTransform(A[0] * 0.32 / 64, A[1] * 0.32 / 64, A[2] * 0.32 / 64, A[3] * 0.32 / 64, A[4], A[5]); c.globalAlpha = 0.35 * o.J.alpha; c.drawImage(contactBlob(), -64, -64); }
   c.globalCompositeOperation = 'source-over'; c.globalAlpha = 1; c.setTransform(1, 0, 0, 1, 0, 0);
   // bodies
-  const bodyCol = '#16130f';
+  const bodyCol = '#16130f', faceCol = '#f7f1e6';
   for (const o of live) {
-    if (o.J.alpha >= 0.999) { c.fillStyle = c.strokeStyle = bodyCol; c.lineCap = c.lineJoin = 'round'; drawFigure(c, o.J, projA); }
+    if (o.J.alpha >= 0.999) { c.fillStyle = c.strokeStyle = bodyCol; c.lineCap = c.lineJoin = 'round'; drawFigure(c, o.J, projA, faceCol); }
     else if (o.J.alpha > 0.001) {
       tctx.setTransform(1, 0, 0, 1, 0, 0); tctx.globalCompositeOperation = 'source-over'; tctx.clearRect(0, 0, W, H);
-      tctx.fillStyle = tctx.strokeStyle = bodyCol; tctx.lineCap = tctx.lineJoin = 'round'; drawFigure(tctx, o.J, projA);
+      tctx.fillStyle = tctx.strokeStyle = bodyCol; tctx.lineCap = tctx.lineJoin = 'round'; drawFigure(tctx, o.J, projA, faceCol);
       c.globalAlpha = o.J.alpha; c.drawImage(tmpC, 0, 0); c.globalAlpha = 1;
     }
   }

@@ -17,6 +17,7 @@ const C = {
   laneGap: 0.62,        // spacing of walkers side by side (brush width)
   footLat: 0.14,       // half distance between left/right feet
   stride: 0.60,         // unhurried, deliberate steps         // one step
+  brush: 0.85,         // width of each walker's ink line (m)
   footLen: 0.62,      // slightly exaggerated so the ink reads as a brush stroke
   vStroke: 1.15, vTransit: 2.0, vRing: 1.2,
   tLeader: 0.45, tFinish: 21.9, tStop: 22.3,
@@ -65,7 +66,7 @@ class Path {
 
 // ---------------------------------------------------------------- globals
 let D, R, strokes, walkers, prints, scen, washes, sprites, blobSprites, ring, bounds, camMain, camTarget, maskPts;
-let gl, glc, glProg, glU, out, octx, shadowC, sctx, tmpC, tctx;
+let gl, glc, glProg, glU, out, octx, shadowC, sctx, tmpC, tctx, inkC, ictx;
 
 // ---------------------------------------------------------------- init
 window.initScene = function (data) {
@@ -73,6 +74,7 @@ window.initScene = function (data) {
   out = document.createElement('canvas'); out.width = W; out.height = H; octx = out.getContext('2d');
   shadowC = document.createElement('canvas'); shadowC.width = W; shadowC.height = H; sctx = shadowC.getContext('2d');
   tmpC = document.createElement('canvas'); tmpC.width = W; tmpC.height = H; tctx = tmpC.getContext('2d');
+  inkC = document.createElement('canvas'); inkC.width = W; inkC.height = H; ictx = inkC.getContext('2d');
   buildStrokes(); buildRing(); buildCamera(); buildWalkers(); buildPrints(); buildScenery();
   buildSprites(); initGL();
   return { strokes: strokes.length, walkers: walkers.length, prints: prints.length, scenery: scen.length, cam: camMain };
@@ -644,22 +646,48 @@ window.renderFrame = function (t, fmt = 'image/jpeg', q = 0.95) {
       for (const sg of [-1, 1]) { const a = it.rot + sg * 0.55; c.beginPath(); c.ellipse(Math.cos(a) * s * 0.6, Math.sin(a) * s * 0.6, s * 0.65, s * 0.3, a, 0, TAU); c.fill(); }
     }
   }
-  // --- footprints (ink)
-  const { Lpx, cw, ch } = sprites.meta; const NST = sprites[0].length;
-  for (const p of prints) {
-    if (p.t > t) break;
-    const P0 = proj(p.x, 0, p.z); if (P0[2] < 0.5 || !onScreen(P0, 40)) continue;
-    const fx = Math.cos(p.ang), fz = Math.sin(p.ang);
-    const Pf = proj(p.x + fx * 0.05, 0, p.z + fz * 0.05), Pr = proj(p.x + fz * 0.05, 0, p.z - fx * 0.05);
-    const Jf = [(Pf[0] - P0[0]) / 0.05, (Pf[1] - P0[1]) / 0.05], Jr = [(Pr[0] - P0[0]) / 0.05, (Pr[1] - P0[1]) / 0.05];
-    const age = t - p.t; const stg = Math.min(NST - 1, Math.floor(clamp(age / 0.7, 0, 1) * (NST - 1) + 1e-6));
-    const lenPx = Math.hypot(Jf[0], Jf[1]) * C.footLen * p.sc; const lvl = clamp(Math.floor(Math.log2(Lpx / Math.max(1, lenPx * 1.6))), 0, 4);
-    const img = sprites[p.side * 3 + p.v][stg][lvl]; const k = (C.footLen * p.sc) / Lpx * (1 << lvl);
-    // sprite x -> lateral (right), sprite y(down) -> backward
-    c.setTransform(Jr[0] * k, Jr[1] * k, -Jf[0] * k, -Jf[1] * k, P0[0], P0[1]);
-    c.globalAlpha = 0.93 * smooth(0, 0.05, age);
-    c.drawImage(img, -img.width / 2, -img.height / 2);
+  // --- ink brush trails (each walker drags a thick scrawled brush line along its stroke)
+  ictx.setTransform(1, 0, 0, 1, 0, 0); ictx.globalCompositeOperation = 'source-over'; ictx.globalAlpha = 1; ictx.clearRect(0, 0, W, H);
+  ictx.lineCap = ictx.lineJoin = 'round'; ictx.strokeStyle = '#000';
+  const trails = [];
+  for (const w of walkers) {
+    if (w.printA === undefined || t < w.tSpawn) continue;
+    const sNow = Math.min(w.sAt(t), w.printB - 0.2); if (sNow <= w.printA + 0.05) continue;
+    const k = Math.pow(strokes[w.stroke].k, 0.75), bw = C.brush * k, len = sNow - w.printA;
+    const step = Math.max(0.12, bw * 0.35), pts = [];
+    for (let s = w.printA; s <= sNow + 1e-6; s += step) pts.push(s);
+    if (pts[pts.length - 1] < sNow) pts.push(sNow);
+    const P = pts.map(s => { const q = w.path.at(s); const p = proj(q[0], 0, q[1]); const u = (s - w.printA) / Math.max(0.01, w.printB - 0.2 - w.printA);
+      // brush pressure: quick press-in, slight swell, thinning toward a flicked end
+      const pr = (0.55 + 0.45 * smooth(0, 0.08, u)) * (1 - 0.55 * smooth(0.82, 1, u)) * (0.9 + 0.12 * Math.sin(s * 2.3 + w.wavePh));
+      return [p[0], p[1], p[2], bw * pr, s]; }).filter(p => p[2] > 0.5);
+    trails.push({ w, P, bw });
   }
+  const strokeTrail = (P, wmul, off) => {
+    for (let i = 1; i < P.length; i++) {
+      const a = P[i - 1], b = P[i]; const lw = (a[3] + b[3]) / 2 * wmul * C.F * 2 / (a[2] + b[2]);
+      let dx = b[0] - a[0], dy = b[1] - a[1]; const l = Math.hypot(dx, dy) || 1; const nx = -dy / l * off * lw, ny = dx / l * off * lw;
+      ictx.lineWidth = Math.max(0.8, lw); ictx.beginPath(); ictx.moveTo(a[0] + nx, a[1] + ny); ictx.lineTo(b[0] + nx, b[1] + ny); ictx.stroke();
+    }
+  };
+  for (const tr of trails) strokeTrail(tr.P, 1, 0);
+  // dry-brush streaks (kasure) cut out of the ink
+  ictx.globalCompositeOperation = 'destination-out';
+  for (const tr of trails) {
+    const ph = tr.w.wavePh;
+    // (kept clean in the body; only the flicked tail breaks up)
+    // the tail of a fast stroke breaks up
+    const n = tr.P.length, tail = tr.P.slice(Math.floor(n * 0.82));
+    if (tail.length > 1) { ictx.globalAlpha = 0.35; strokeTrail(tail, 0.22, 0.25); strokeTrail(tail, 0.15, -0.3); }
+  }
+  ictx.globalCompositeOperation = 'source-over'; ictx.globalAlpha = 1;
+  // bleed into paper, then the ink itself
+  c.setTransform(1, 0, 0, 1, 0, 0);
+  c.globalAlpha = 0.35; c.filter = 'blur(3px)'; c.drawImage(inkC, 0, 0); c.filter = 'none';
+  c.globalAlpha = 0.94; c.drawImage(inkC, 0, 0);
+  // wet tip: a darker blob where the brush currently is
+  c.fillStyle = '#100d0b';
+  for (const tr of trails) { const p = tr.P[tr.P.length - 1]; if (!p || tr.w.sAt(t) >= tr.w.printB - 0.25) continue; c.globalAlpha = 0.5; c.beginPath(); c.arc(p[0], p[1], p[3] * 0.55 * C.F / p[2], 0, TAU); c.fill(); }
   c.globalAlpha = 1; c.setTransform(1, 0, 0, 1, 0, 0);
 
   // --- people
